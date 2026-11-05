@@ -1,0 +1,20 @@
+# Gradle build products
+.gradle/
+build/
+out/
+
+# IDE local configuration
+.idea/
+*.iml
+*.ipr
+*.iws
+
+# Compiled output and exported packages
+*.class
+IDEle-*.zip
+RiderLAN-*.zip
+
+# OS / logs
+.DS_Store
+Thumbs.db
+*.log
