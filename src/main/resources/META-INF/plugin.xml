@@ -1,11 +1,12 @@
 <idea-plugin>
     <id>dev.riderlan</id>
     <name>IDEle</name>
-    <version>1.1.1</version>
+    <version>1.2.0</version>
     <vendor>IDEle Contributors</vendor>
     <description><![CDATA[
         LAN collaboration for 2–16 Rider users: authenticated encrypted transport, host approval, chat,
-        Tic-Tac-Toe, Connect Four, and real-time Pong. Windows-first. No cloud required.
+        and pluggable games: Tic-Tac-Toe, Connect Four and real-time Pong head-to-head, Lights Out solo.
+        Windows-first. No cloud required.
     ]]></description>
     <idea-version since-build="242"/>
     <depends>com.intellij.modules.platform</depends>

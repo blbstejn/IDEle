@@ -5,7 +5,7 @@ set -eu
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 BUILD="$ROOT/build"
 OUT="$BUILD/offline-export"
-VERSION=1.1.1
+VERSION=1.2.0
 # Do not update an existing ZIP in place: zip(1) keeps removed/stale entries.
 rm -f "$ROOT/IDEle-$VERSION.zip"
 # Always remove previous compiled output: renamed/removed classes must not survive.
@@ -22,7 +22,7 @@ javac --release 21 -encoding UTF-8 -Xlint:all -Werror -cp "$BUILD/offline-stubs"
 javac --release 21 -encoding UTF-8 -Xlint:all -Werror -cp "$BUILD/classes/java/main" \
   -d "$BUILD/classes/java/test" @"$BUILD/test-sources.lst"
 java -Djava.awt.headless=true \
-  -cp "$BUILD/classes/java/main:$BUILD/classes/java/test" \
+  -cp "$BUILD/classes/java/main:$BUILD/classes/java/test:$ROOT/src/main/resources" \
   dev.riderlan.core.IntegrationTest
 jar --create --file "$OUT/IDEle/lib/idele.jar" \
   -C "$BUILD/classes/java/main" . -C "$ROOT/src/main/resources" .

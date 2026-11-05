@@ -1,0 +1,5 @@
+# One line per game module, sorted alphabetically to keep merges from different branches simple.
+dev.riderlan.games.connectfour.ConnectFourGame
+dev.riderlan.games.lightsout.LightsOutGame
+dev.riderlan.games.pong.PongGame
+dev.riderlan.games.tictactoe.TicTacToeGame

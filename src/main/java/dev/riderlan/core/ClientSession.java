@@ -1,5 +1,7 @@
 package dev.riderlan.core;
 
+import dev.riderlan.game.GameRegistry;
+
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.Socket;
@@ -58,7 +60,9 @@ public final class ClientSession implements Session {
             transport = SecureTransport.client(socket, key);
             // The only synchronous application write is on the calling worker,
             // before the ClientSession constructor returns and before it reaches the EDT.
-            transport.write(Packet.of("HELLO", cleanName, Rules.PROTOCOL));
+            // The host only offers games that every player in a match has installed.
+            transport.write(Packet.of("HELLO", cleanName, Rules.PROTOCOL,
+                    String.join(",", GameRegistry.installed().ids())));
             socket.setSoTimeout(0);
             writer = new Thread(this::writeLoop, "IDEle-client-writer");
             writer.setDaemon(true);
@@ -145,11 +149,8 @@ public final class ClientSession implements Session {
     @Override public void respond(String challengeId, boolean accept) {
         command(Packet.of("RESPONSE", challengeId, Boolean.toString(accept)));
     }
-    @Override public void move(String matchId, int position) {
-        command(Packet.of("MOVE", matchId, Integer.toString(position)));
-    }
-    @Override public void paddle(String matchId, int direction) {
-        command(Packet.of("PADDLE", matchId, Integer.toString(direction)));
+    @Override public void gameInput(String matchId, java.util.List<String> args) {
+        command(GamePackets.input(matchId, args));
     }
 
     @Override public void close() {

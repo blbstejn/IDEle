@@ -1,16 +1,22 @@
-package dev.riderlan.core;
+package dev.riderlan.games.pong;
 
+import dev.riderlan.game.GameGraphics;
+import dev.riderlan.game.GameLogic;
+import dev.riderlan.game.GameState;
+
+import java.util.List;
 import java.util.Locale;
 
-/** 400x240 logical arena, 25 authoritative frames per second, first player to seven. */
-final class PongMatch extends GameMatch {
-    static final int WIDTH = 400;
-    static final int HEIGHT = 240;
-    static final int PADDLE_H = 50;
-    private static final int PADDLE_INSET = 16;
-    private static final int PADDLE_WIDTH = 8;
-    private static final int BALL_R = 6;
+/**
+ * 400x240 logical arena, one step per tick (25 per second), first player to {@link #TARGET}.
+ * Input: [direction] of -1 (up), 0 or 1 (down).
+ * State: [0] left paddle y, [1] right paddle y, [2] ball x, [3] ball y, [4] left score, [5] right score.
+ */
+final class PongLogic implements GameLogic {
+    static final int WIDTH = 400, HEIGHT = 240, PADDLE_H = 50, TARGET = 7;
+    static final int PADDLE_INSET = 16, PADDLE_WIDTH = 8, BALL_R = 6;
 
+    private final List<String> players;
     private double leftY = (HEIGHT - PADDLE_H) / 2.0;
     private double rightY = leftY;
     private double x = WIDTH / 2.0, y = HEIGHT / 2.0;
@@ -20,22 +26,25 @@ final class PongMatch extends GameMatch {
     private int pauseTicks = 20;
     private String winner = "";
 
-    PongMatch(String id, String first, String second) {
-        super(id, Rules.PONG, first, second);
+    PongLogic(List<String> players) {
+        if (players.size() != 2) throw new IllegalArgumentException("Pong needs two players");
+        this.players = List.copyOf(players);
     }
 
-    void control(String who, int direction) {
-        if (finished || !contains(who)) return;
+    @Override public boolean input(String who, List<String> args) {
+        if (!winner.isEmpty()) return false;
+        int direction = GameGraphics.intArg(args, 0, "movement");
         if (direction < -1 || direction > 1) throw new IllegalArgumentException("Invalid movement");
-        if (first.equals(who)) leftInput = direction;
+        if (players.get(0).equals(who)) leftInput = direction;
         else rightInput = direction;
+        return false; // The next tick broadcasts the result.
     }
 
-    void tick() {
-        if (finished) return;
+    @Override public boolean tick() {
+        if (!winner.isEmpty()) return false;
         leftY = clamp(leftY + leftInput * 6.0, 0, HEIGHT - PADDLE_H);
         rightY = clamp(rightY + rightInput * 6.0, 0, HEIGHT - PADDLE_H);
-        if (pauseTicks > 0) { pauseTicks--; return; }
+        if (pauseTicks > 0) { pauseTicks--; return true; }
         x += vx;
         y += vy;
         if (y < BALL_R) { y = BALL_R; vy = Math.abs(vy); }
@@ -55,10 +64,8 @@ final class PongMatch extends GameMatch {
             leftScore++;
             reset(true);
         }
-        if (leftScore >= 7 || rightScore >= 7) {
-            finished = true;
-            winner = leftScore >= 7 ? first : second;
-        }
+        if (leftScore >= TARGET || rightScore >= TARGET) winner = leftScore >= TARGET ? players.get(0) : players.get(1);
+        return true;
     }
 
     private void bounce(double paddleY, boolean fromLeft) {
@@ -81,14 +88,13 @@ final class PongMatch extends GameMatch {
         return Math.max(a, Math.min(b, n));
     }
 
-    @Override Packet snapshot() {
-        return Packet.of("GAME_PONG", id,
-                i(leftY), i(rightY), i(x), i(y),
-                Integer.toString(leftScore), Integer.toString(rightScore),
-                finished ? "finished" : "playing", winner);
+    @Override public GameState state() {
+        List<String> data = List.of(f(leftY), f(rightY), f(x), f(y),
+                Integer.toString(leftScore), Integer.toString(rightScore));
+        return new GameState(!winner.isEmpty(), winner, data);
     }
 
-    private static String i(double d) {
+    private static String f(double d) {
         return String.format(Locale.ROOT, "%.1f", d);
     }
 }

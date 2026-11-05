@@ -1,5 +1,8 @@
 package dev.riderlan.core;
 
+import dev.riderlan.game.GameDefinition;
+import dev.riderlan.game.GameRegistry;
+
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
@@ -10,6 +13,7 @@ import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -27,7 +31,8 @@ public final class HostSession implements Session {
     private final Map<String, Peer> members = new LinkedHashMap<>();
     private final Map<String, Peer> pending = new LinkedHashMap<>();
     private final Map<String, Challenge> challenges = new LinkedHashMap<>();
-    private final Map<String, GameMatch> matches = new LinkedHashMap<>();
+    private final Map<String, Match> matches = new LinkedHashMap<>();
+    private final GameRegistry games = GameRegistry.installed();
     private final ScheduledExecutorService scheduler;
     private final Semaphore connectionSlots = new Semaphore(24);
     private final String sessionKey;
@@ -134,7 +139,7 @@ public final class HostSession implements Session {
             SecureTransport transport = SecureTransport.host(socket, sessionKey);
             peer = new Peer(socket, transport);
             Packet hello = peer.read();
-            if (hello == null || !"HELLO".equals(hello.type()) || !hello.has(2)) {
+            if (hello == null || !"HELLO".equals(hello.type()) || (!hello.has(2) && !hello.has(3))) {
                 peer.finish(Packet.of("DENIED", "Invalid handshake"));
                 return;
             }
@@ -142,6 +147,8 @@ public final class HostSession implements Session {
                 peer.finish(Packet.of("DENIED", "Incompatible IDEle protocol"));
                 return;
             }
+            // Installed games may differ between builds, e.g. while a new game is developed on a branch.
+            peer.games = hello.has(3) ? parseGames(hello.get(2)) : Set.of();
             String proposed = Rules.username(hello.get(0));
             synchronized (this) {
                 if (closed) return;
@@ -183,6 +190,28 @@ public final class HostSession implements Session {
             if (peer != null) disconnect(peer);
             else try { socket.close(); } catch (IOException ignored) { }
         }
+    }
+
+    private static Set<String> parseGames(String list) {
+        if (list.isEmpty()) return Set.of();
+        String[] ids = list.split(",", -1);
+        if (ids.length > 64) throw new IllegalArgumentException("Too many games announced");
+        for (String id : ids) {
+            if (!GameRegistry.validId(id)) throw new IllegalArgumentException("Invalid game list");
+        }
+        return Set.of(java.util.Arrays.stream(ids).distinct().toArray(String[]::new));
+    }
+
+    private synchronized boolean hasGame(String userId, String gameId) {
+        if (HOST_ID.equals(userId)) return games.contains(gameId);
+        Peer peer = members.get(userId);
+        return peer != null && peer.games.contains(gameId);
+    }
+
+    private synchronized String nameOf(String userId) {
+        if (HOST_ID.equals(userId)) return name;
+        Peer peer = members.get(userId);
+        return peer == null ? userId : peer.name;
     }
 
     private synchronized boolean nameInUse(String proposed) {
@@ -264,6 +293,17 @@ public final class HostSession implements Session {
         if (!first.equals(second)) to(second, packet);
     }
 
+    private synchronized void toPlayers(Match match, Packet packet) {
+        for (String player : match.players) to(player, packet);
+    }
+
+    /** A broken game module ends only its own match; the session keeps running. */
+    private synchronized void abort(Match match, Match.Failure failure) {
+        match.finished = true;
+        listener.onPacket(Packet.of("STATUS", "Game error: " + failure.getMessage()));
+        toPlayers(match, Packet.of("GAME_OVER", match.id, "Game error: " + failure.getMessage()));
+    }
+
     private synchronized boolean exists(String userId) {
         return HOST_ID.equals(userId) || members.containsKey(userId);
     }
@@ -278,11 +318,8 @@ public final class HostSession implements Session {
     @Override public void respond(String challengeId, boolean accept) {
         process(HOST_ID, Packet.of("RESPONSE", challengeId, Boolean.toString(accept)));
     }
-    @Override public void move(String matchId, int position) {
-        process(HOST_ID, Packet.of("MOVE", matchId, Integer.toString(position)));
-    }
-    @Override public void paddle(String matchId, int direction) {
-        process(HOST_ID, Packet.of("PADDLE", matchId, Integer.toString(direction)));
+    @Override public void gameInput(String matchId, List<String> args) {
+        process(HOST_ID, GamePackets.input(matchId, args));
     }
 
     private synchronized void process(String from, Packet packet) {
@@ -302,23 +339,19 @@ public final class HostSession implements Session {
                 }
                 case "CHALLENGE" -> createChallenge(from, packet);
                 case "RESPONSE" -> respondToChallenge(from, packet);
-                case "MOVE" -> {
-                    require(packet, 2);
-                    GameMatch match = matches.get(packet.get(0));
-                    if (!(match instanceof GridMatch grid) || !match.contains(from)) {
-                        throw new IllegalArgumentException("Game is unavailable");
+                case "GAME_INPUT" -> {
+                    if (packet.fields().isEmpty() || packet.fields().size() > GamePackets.MAX_INPUT_ARGS + 1) {
+                        throw new IllegalArgumentException("Invalid command fields");
                     }
-                    int position = Integer.parseInt(packet.get(1));
-                    Packet state = grid.move(from, position);
-                    both(match.first, match.second, state);
-                }
-                case "PADDLE" -> {
-                    require(packet, 2);
-                    GameMatch match = matches.get(packet.get(0));
-                    if (!(match instanceof PongMatch pong) || !match.contains(from)) {
-                        throw new IllegalArgumentException("Pong match is unavailable");
+                    Match match = matches.get(packet.get(0));
+                    if (match == null || !match.contains(from)) throw new IllegalArgumentException("Game is unavailable");
+                    try {
+                        if (match.input(from, packet.fields().subList(1, packet.fields().size()))) {
+                            toPlayers(match, match.statePacket());
+                        }
+                    } catch (Match.Failure broken) {
+                        abort(match, broken);
                     }
-                    pong.control(from, Integer.parseInt(packet.get(1)));
                 }
                 case "LEAVE" -> {
                     if (!HOST_ID.equals(from)) {
@@ -338,7 +371,7 @@ public final class HostSession implements Session {
     }
 
     private synchronized boolean busy(String id) {
-        for (GameMatch game : matches.values()) {
+        for (Match game : matches.values()) {
             if (!game.finished && game.contains(id)) return true;
         }
         return false;
@@ -347,8 +380,17 @@ public final class HostSession implements Session {
     private synchronized void createChallenge(String from, Packet packet) {
         require(packet, 2);
         String target = packet.get(0), game = packet.get(1);
-        if (!Rules.supportedGame(game)) throw new IllegalArgumentException("Unsupported game");
+        GameDefinition definition = games.find(game);
+        if (definition == null) throw new IllegalArgumentException("The host does not have this game installed");
+        if (definition.maxPlayers() < 2) {
+            throw new IllegalArgumentException(definition.displayName() + " is a single-player game");
+        }
         if (from.equals(target) || !exists(target)) throw new IllegalArgumentException("The selected player is unavailable");
+        for (String player : List.of(from, target)) {
+            if (!hasGame(player, game)) {
+                throw new IllegalArgumentException(nameOf(player) + " does not have " + definition.displayName() + " installed");
+            }
+        }
         if (busy(from) || busy(target)) throw new IllegalArgumentException("Finish your current match first");
         expireChallenges();
         if (challenges.size() >= 20) throw new IllegalArgumentException("Too many pending challenges");
@@ -380,19 +422,28 @@ public final class HostSession implements Session {
         both(choice.from, choice.to, Packet.of("CHALLENGE_RESULT", choice.id, accepted ? "accepted" : "declined"));
         if (!accepted) return;
         String matchId = "g" + (++serial);
-        GameMatch match = Rules.PONG.equals(choice.game)
-                ? new PongMatch(matchId, choice.from, choice.to)
-                : new GridMatch(matchId, choice.game, choice.from, choice.to);
+        GameDefinition definition = games.find(choice.game);
+        Match match;
+        try {
+            match = new Match(matchId, definition, List.of(choice.from, choice.to));
+        } catch (Match.Failure broken) {
+            both(choice.from, choice.to, Packet.of("ERROR", "Game error: " + broken.getMessage()));
+            return;
+        }
         matches.put(matchId, match);
         // Bounded memory across a long-running session.
         if (matches.size() > 100) {
-            Iterator<Map.Entry<String, GameMatch>> iterator = matches.entrySet().iterator();
+            Iterator<Map.Entry<String, Match>> iterator = matches.entrySet().iterator();
             while (matches.size() > 80 && iterator.hasNext()) {
                 if (iterator.next().getValue().finished) iterator.remove();
             }
         }
-        both(match.first, match.second, match.startPacket());
-        both(match.first, match.second, match.snapshot());
+        toPlayers(match, match.startPacket());
+        try {
+            toPlayers(match, match.statePacket());
+        } catch (Match.Failure broken) {
+            abort(match, broken);
+        }
     }
 
     /** Remove expired challenges AND notify both participants, so neither remains stuck waiting. */
@@ -423,8 +474,8 @@ public final class HostSession implements Session {
                 cancelled.add(c);
             }
         }
-        List<GameMatch> ended = new ArrayList<>();
-        for (GameMatch match : matches.values()) {
+        List<Match> ended = new ArrayList<>();
+        for (Match match : matches.values()) {
             if (!match.finished && match.contains(leftId)) {
                 match.finished = true;
                 ended.add(match);
@@ -435,8 +486,10 @@ public final class HostSession implements Session {
             to(c.from.equals(leftId) ? c.to : c.from,
                     Packet.of("CHALLENGE_RESULT", c.id, "unavailable"));
         }
-        for (GameMatch match : ended) {
-            to(match.other(leftId), Packet.of("GAME_OVER", match.id, "Opponent disconnected"));
+        for (Match match : ended) {
+            for (String player : match.players) {
+                if (!player.equals(leftId)) to(player, Packet.of("GAME_OVER", match.id, "Opponent disconnected"));
+            }
         }
     }
 
@@ -445,10 +498,13 @@ public final class HostSession implements Session {
         try {
             expirePending();
             expireChallenges();
-            for (GameMatch match : matches.values()) {
-                if (match instanceof PongMatch pong && !pong.finished) {
-                    pong.tick();
-                    both(pong.first, pong.second, pong.snapshot());
+            // Copy: sending can disconnect a slow player, which ends matches while iterating.
+            for (Match match : List.copyOf(matches.values())) {
+                if (match.finished || !match.game.realtime()) continue;
+                try {
+                    if (match.tick()) toPlayers(match, match.statePacket());
+                } catch (Match.Failure broken) {
+                    abort(match, broken);
                 }
             }
         } catch (Exception ex) {
@@ -503,6 +559,7 @@ public final class HostSession implements Session {
         volatile String name = "";
         volatile boolean approved;
         volatile long approvalDeadline;
+        volatile Set<String> games = Set.of();
 
         Peer(Socket socket, SecureTransport transport) {
             this.socket = socket;

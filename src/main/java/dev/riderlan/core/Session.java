@@ -5,10 +5,11 @@ public interface Session extends AutoCloseable {
     boolean hosting();
     void chat(String message);
     void privateMessage(String toId, String message);
-    void challenge(String toId, String game);
+    /** Challenges another participant to the game with this {@link dev.riderlan.game.GameDefinition#id()}. */
+    void challenge(String toId, String gameId);
     void respond(String challengeId, boolean accept);
-    void move(String matchId, int position);
-    void paddle(String matchId, int direction);
+    /** Forwards input to the authoritative game logic of a running match. */
+    void gameInput(String matchId, java.util.List<String> args);
     default void approve(String requestId, boolean accept) {
         throw new IllegalStateException("Only hosts can approve participants");
     }

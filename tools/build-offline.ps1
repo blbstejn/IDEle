@@ -4,7 +4,7 @@ $ErrorActionPreference = 'Stop'
 $root = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $build = Join-Path $root 'build'
 $out = Join-Path $build 'offline-export'
-$version = '1.1.1'
+$version = '1.2.0'
 
 function Invoke-Checked([string]$command, [string[]]$arguments) {
     & $command @arguments
@@ -31,7 +31,7 @@ $testFiles = @(Get-ChildItem (Join-Path $root 'src/test/java') -Recurse -Filter 
 Invoke-Checked 'javac' (@('--release', '21', '-encoding', 'UTF-8', '-d', $stubClasses) + $stubFiles)
 Invoke-Checked 'javac' (@('--release', '21', '-encoding', 'UTF-8', '-Xlint:all', '-Werror', '-cp', $stubClasses, '-d', $mainClasses) + $mainFiles)
 Invoke-Checked 'javac' (@('--release', '21', '-encoding', 'UTF-8', '-Xlint:all', '-Werror', '-cp', $mainClasses, '-d', $testClasses) + $testFiles)
-Invoke-Checked 'java' @('-Djava.awt.headless=true', '-cp', "$mainClasses;$testClasses", 'dev.riderlan.core.IntegrationTest')
+Invoke-Checked 'java' @('-Djava.awt.headless=true', '-cp', "$mainClasses;$testClasses;$(Join-Path $root 'src/main/resources')", 'dev.riderlan.core.IntegrationTest')
 $jar = Join-Path $exportLib 'idele.jar'
 Invoke-Checked 'jar' @('--create', '--file', $jar, '-C', $mainClasses, '.', '-C', (Join-Path $root 'src/main/resources'), '.')
 $jarEntries = & jar --list --file $jar

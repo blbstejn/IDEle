@@ -211,68 +211,83 @@ public final class IntegrationTest {
             check(onAlicePrivate.equals(onBobPrivate), "Private messages must reach sender and target");
             check(!hostEvents.contains("PM"), "Host UI must not display other players' PMs");
 
+            // Generic GAME_STATE layout: matchId, playing|finished, winner, game data...
             // Tic-Tac-Toe: Alice wins top row.
-            alice.challenge(bob.selfId(), Rules.TIC_TAC_TOE);
+            alice.challenge(bob.selfId(), "tic-tac-toe");
             bobEvents.take("CHALLENGE_IN");
             String c1 = aliceEvents.take("CHALLENGE_SENT").get(0);
             bob.respond(c1, true);
             Packet start = aliceEvents.take("GAME_START");
             bobEvents.take("GAME_START");
             String g1 = start.get(0);
-            aliceEvents.waitFor("GAME_GRID", p -> p.get(0).equals(g1));
-            bobEvents.waitFor("GAME_GRID", p -> p.get(0).equals(g1));
+            check("tic-tac-toe".equals(start.get(1)) && start.get(2).equals(alice.selfId())
+                    && start.get(3).equals(bob.selfId()), "GAME_START must name the game and players in seat order");
+            aliceEvents.waitFor("GAME_STATE", p -> p.get(0).equals(g1));
+            bobEvents.waitFor("GAME_STATE", p -> p.get(0).equals(g1));
             Session[] turns = {alice, bob, alice, bob, alice};
             int[] squares = {0, 3, 1, 4, 2};
             for (int i = 0; i < turns.length; i++) {
-                turns[i].move(g1, squares[i]);
+                turns[i].gameInput(g1, List.of(Integer.toString(squares[i])));
                 int step = i;
                 String expected = i == turns.length - 1 ? "finished" : "playing";
-                aliceEvents.waitFor("GAME_GRID", p -> p.get(0).equals(g1) && p.get(3).equals(expected)
-                        && p.get(1).charAt(squares[step]) != '.');
-                bobEvents.waitFor("GAME_GRID", p -> p.get(0).equals(g1) && p.get(3).equals(expected)
-                        && p.get(1).charAt(squares[step]) != '.');
+                aliceEvents.waitFor("GAME_STATE", p -> p.get(0).equals(g1) && p.get(1).equals(expected)
+                        && p.get(3).charAt(squares[step]) != '.');
+                bobEvents.waitFor("GAME_STATE", p -> p.get(0).equals(g1) && p.get(1).equals(expected)
+                        && p.get(3).charAt(squares[step]) != '.');
             }
             aliceEvents.waitFor("CHALLENGE_RESULT", p -> p.get(0).equals(c1));
             check(true, "Tic-Tac-Toe completed");
 
+            // Invalid input is reported only to the sender; finished matches ignore late input.
+            bob.gameInput(g1, List.of("4"));
+            check(!bobEvents.contains("ERROR"), "Late input to a finished match should be ignored");
+
+            // Solo-only and unknown games cannot be used for challenges.
+            alice.challenge(bob.selfId(), "lights-out");
+            check(aliceEvents.take("ERROR").get(0).contains("single-player"), "Solo game was offered as a challenge");
+            alice.challenge(bob.selfId(), "no-such-game");
+            check(aliceEvents.take("ERROR").get(0).contains("not have"), "Unknown game was accepted");
+
             // Connect Four: Bob wins column 0 with four vertical disks against host.
-            bob.challenge("host", Rules.CONNECT_FOUR);
+            bob.challenge("host", "connect-four");
             Packet requested = hostEvents.take("CHALLENGE_IN");
             host.respond(requested.get(0), true);
             String g2 = bobEvents.take("GAME_START").get(0);
             hostEvents.take("GAME_START");
-            bobEvents.waitFor("GAME_GRID", p -> p.get(0).equals(g2));
-            hostEvents.waitFor("GAME_GRID", p -> p.get(0).equals(g2));
+            bobEvents.waitFor("GAME_STATE", p -> p.get(0).equals(g2));
+            hostEvents.waitFor("GAME_STATE", p -> p.get(0).equals(g2));
+            host.gameInput(g2, List.of("3"));
+            check(hostEvents.take("ERROR").get(0).contains("turn"), "Out-of-turn input must be rejected");
             for (int i = 0; i < 7; i++) {
-                if (i % 2 == 0) bob.move(g2, 0);
-                else host.move(g2, 1);
+                if (i % 2 == 0) bob.gameInput(g2, List.of("0"));
+                else host.gameInput(g2, List.of("1"));
                 int step = i;
                 String state = i == 6 ? "finished" : "playing";
-                bobEvents.waitFor("GAME_GRID", p -> p.get(0).equals(g2) && p.get(3).equals(state)
-                        && p.get(1).chars().filter(ch -> ch == 'X' || ch == 'O').count() == step + 1);
-                hostEvents.waitFor("GAME_GRID", p -> p.get(0).equals(g2) && p.get(3).equals(state)
-                        && p.get(1).chars().filter(ch -> ch == 'X' || ch == 'O').count() == step + 1);
+                bobEvents.waitFor("GAME_STATE", p -> p.get(0).equals(g2) && p.get(1).equals(state)
+                        && p.get(3).chars().filter(ch -> ch == 'X' || ch == 'O').count() == step + 1);
+                hostEvents.waitFor("GAME_STATE", p -> p.get(0).equals(g2) && p.get(1).equals(state)
+                        && p.get(3).chars().filter(ch -> ch == 'X' || ch == 'O').count() == step + 1);
             }
             check(true, "Connect Four completed");
 
             // Pong: hosted simulation sends live updates, controls move a paddle.
-            host.challenge(alice.selfId(), Rules.PONG);
+            host.challenge(alice.selfId(), "pong");
             Packet pongRequest = aliceEvents.take("CHALLENGE_IN");
             alice.respond(pongRequest.get(0), true);
             String g3 = aliceEvents.take("GAME_START").get(0);
             hostEvents.take("GAME_START");
-            Packet initial = aliceEvents.waitFor("GAME_PONG", p -> p.get(0).equals(g3));
+            Packet initial = aliceEvents.waitFor("GAME_STATE", p -> p.get(0).equals(g3));
             check(initial.fields().size() == 9, "Pong payload invalid");
-            host.paddle(g3, -1);
-            double before = Double.parseDouble(initial.get(1));
-            Packet moved = aliceEvents.waitFor("GAME_PONG", p -> p.get(0).equals(g3) &&
-                    Double.parseDouble(p.get(1)) < before);
-            check(Double.parseDouble(moved.get(1)) < before, "Host paddle not moving");
-            host.paddle(g3, 0);
-            alice.paddle(g3, 1);
-            aliceEvents.waitFor("GAME_PONG", p -> p.get(0).equals(g3) &&
-                    Double.parseDouble(p.get(2)) > 95);
-            alice.paddle(g3, 0);
+            host.gameInput(g3, List.of("-1"));
+            double before = Double.parseDouble(initial.get(3));
+            Packet moved = aliceEvents.waitFor("GAME_STATE", p -> p.get(0).equals(g3) &&
+                    Double.parseDouble(p.get(3)) < before);
+            check(Double.parseDouble(moved.get(3)) < before, "Host paddle not moving");
+            host.gameInput(g3, List.of("0"));
+            alice.gameInput(g3, List.of("1"));
+            aliceEvents.waitFor("GAME_STATE", p -> p.get(0).equals(g3) &&
+                    Double.parseDouble(p.get(4)) > 95);
+            alice.gameInput(g3, List.of("0"));
 
             // A disallowed duplicate name cannot enter or shadow an approved participant.
             Collector duplicateEvents = new Collector();
@@ -340,7 +355,7 @@ public final class IntegrationTest {
         SecureTransportTest.run();
         swingTest();
         RegressionTest.run();
-        GameRulesTest.run();
+        GameContractTest.run();
         System.out.println("PASS — " + assertions + " baseline assertions; socket, admission, privacy, chat, games and Swing smoke tests");
     }
 }

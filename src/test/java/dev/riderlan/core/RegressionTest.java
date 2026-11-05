@@ -98,14 +98,14 @@ final class RegressionTest {
             check(acceptedEvents.open(), "Approved connection could not send after idle");
 
             // Expired challenges must be cleared and both parties must be told.
-            host.challenge(accepted.selfId(), Rules.TIC_TAC_TOE);
+            host.challenge(accepted.selfId(), "tic-tac-toe");
             Packet incoming = acceptedEvents.await("CHALLENGE_IN");
             String challengeId = incoming.get(0);
             check("expired".equals(acceptedEvents.await("CHALLENGE_RESULT").get(1)),
                     "Recipient did not receive expired challenge result");
             check("expired".equals(hostEvents.await("CHALLENGE_RESULT", p -> p.get(0).equals(challengeId)).get(1)),
                     "Challenger was left waiting on expired challenge");
-            host.challenge(accepted.selfId(), Rules.CONNECT_FOUR);
+            host.challenge(accepted.selfId(), "connect-four");
             acceptedEvents.await("CHALLENGE_IN"); // Previously expired challenge does not block new one.
 
             rejected = new ClientSession("Pending", "127.0.0.1", port, host.sessionKey(), rejectedEvents);

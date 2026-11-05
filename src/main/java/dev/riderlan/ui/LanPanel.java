@@ -1,12 +1,19 @@
 package dev.riderlan.ui;
 
 import dev.riderlan.core.ClientSession;
+import dev.riderlan.core.GamePackets;
 import dev.riderlan.core.HostSession;
 import dev.riderlan.core.Packet;
 import dev.riderlan.core.Rules;
 import dev.riderlan.core.Session;
 import dev.riderlan.core.SessionListener;
 import dev.riderlan.core.SecureTransport;
+import dev.riderlan.core.SoloGame;
+import dev.riderlan.game.GameDefinition;
+import dev.riderlan.game.GameRegistry;
+import dev.riderlan.game.GameState;
+import dev.riderlan.game.GameView;
+import dev.riderlan.game.GameViewContext;
 
 import javax.swing.BorderFactory;
 import javax.swing.Box;
@@ -59,6 +66,56 @@ public final class LanPanel extends JPanel implements AutoCloseable {
     private record Waiting(String id, String name, String address) {
         @Override public String toString() { return name + "  (" + address + ")"; }
     }
+    private record GameItem(GameDefinition game) {
+        @Override public String toString() {
+            String mode = game.minPlayers() == 1 && game.maxPlayers() == 1 ? "solo"
+                    : game.minPlayers() == 1 ? "solo or 2 players" : "2 players";
+            return game.displayName() + "  (" + mode + ")";
+        }
+    }
+
+    /** The match shown in the Games tab: a networked match or a local solo game. */
+    private final class Active implements GameViewContext {
+        final String matchId;
+        final GameDefinition game;
+        final List<String> players;
+        final String self;
+        GameView view;
+        SoloGame solo;
+        boolean finished;
+
+        Active(String matchId, GameDefinition game, List<String> players, String self) {
+            this.matchId = matchId;
+            this.game = game;
+            this.players = List.copyOf(players);
+            this.self = self;
+        }
+
+        boolean networked() { return !SoloGame.PLAYER_ID.equals(self); }
+
+        @Override public String selfId() { return self; }
+        @Override public List<String> players() { return players; }
+        @Override public String displayName(String playerId) {
+            return networked() ? display(playerId) : name.getText().strip();
+        }
+
+        @Override public void send(String... args) {
+            try {
+                if (!networked()) {
+                    if (solo != null) solo.input(List.of(args));
+                } else if (session != null) session.gameInput(matchId, List.of(args));
+            } catch (IllegalArgumentException rejected) {
+                if (active == this) helpLabel.setText(rejected.getMessage());
+            }
+        }
+
+        void close() {
+            if (solo != null) solo.close();
+            if (view != null) {
+                try { view.stop(); } catch (RuntimeException ignored) { /* A broken view must not block cleanup. */ }
+            }
+        }
+    }
     private static final DateTimeFormatter CLOCK = DateTimeFormatter.ofPattern("HH:mm");
 
     private final AtomicInteger generation = new AtomicInteger();
@@ -86,20 +143,21 @@ public final class LanPanel extends JPanel implements AutoCloseable {
     private final JTextField message = new JTextField();
     private final JButton sendButton = new JButton("Send");
     private final JComboBox<Target> challenger = new JComboBox<>();
-    private final JComboBox<String> gameChoice = new JComboBox<>(new String[]{
-            Rules.TIC_TAC_TOE, Rules.CONNECT_FOUR, Rules.PONG
-    });
+    private final GameRegistry games = GameRegistry.installed();
+    private final JComboBox<GameItem> gameChoice = new JComboBox<>();
     private final JButton challengeButton = new JButton("Challenge");
+    private final JButton soloButton = new JButton("Play solo");
     private final JLabel gameLabel = new JLabel("No active game");
-    private final JLabel helpLabel = new JLabel("Select a participant to challenge.");
-    private final GameCanvas canvas = new GameCanvas(this::playMove, this::movePaddle);
+    private final JLabel helpLabel = new JLabel(IDLE_HELP);
+    private final JPanel arena = new JPanel(new BorderLayout());
+    private final JLabel placeholder = new JLabel("", javax.swing.SwingConstants.CENTER);
     private final JTabbedPane tabs = new JTabbedPane();
+    private static final String IDLE_HELP = "Challenge a participant, or pick a solo game and press Play solo.";
 
     private volatile Session session;
     private volatile Socket connectingSocket;
     private boolean connecting;
-    private String matchId = "";
-    private String gameP1 = "", gameP2 = "";
+    private Active active;
     private volatile boolean closing;
 
     public LanPanel() {
@@ -211,20 +269,28 @@ public final class LanPanel extends JPanel implements AutoCloseable {
     private JPanel buildGames() {
         JPanel panel = new JPanel(new BorderLayout(6, 8));
         JPanel controls = vertical();
-        controls.add(row(new JLabel("Opponent:"), challenger));
-        controls.add(row(new JLabel("Game:"), gameChoice, challengeButton));
-        JPanel gameTitle = row(gameLabel);
-        controls.add(gameTitle);
+        for (GameDefinition game : games.all()) gameChoice.addItem(new GameItem(game));
+        controls.add(row(new JLabel("Game:"), gameChoice));
+        controls.add(row(new JLabel("Opponent:"), challenger, challengeButton, soloButton));
+        controls.add(row(gameLabel));
         panel.add(controls, BorderLayout.NORTH);
-        panel.add(canvas, BorderLayout.CENTER);
+        placeholder.setText(games.all().isEmpty()
+                ? "No games are installed in this build." : "No game running.");
+        if (!games.problems().isEmpty()) placeholder.setToolTipText(String.join("\n", games.problems()));
+        arena.add(placeholder, BorderLayout.CENTER);
+        panel.add(arena, BorderLayout.CENTER);
         JPanel below = new JPanel(new GridLayout(0, 1));
         below.add(helpLabel);
-        JButton focus = new JButton("Focus arena for Pong keyboard controls");
-        focus.addActionListener(e -> canvas.requestFocusInWindow());
-        below.add(focus);
         panel.add(below, BorderLayout.SOUTH);
+        gameChoice.addActionListener(e -> updateEnabled());
         challengeButton.addActionListener(e -> sendChallenge());
+        soloButton.addActionListener(e -> startSolo());
         return panel;
+    }
+
+    private GameDefinition selectedGame() {
+        GameItem item = (GameItem) gameChoice.getSelectedItem();
+        return item == null ? null : item.game();
     }
 
     private void hostSession() {
@@ -331,11 +397,13 @@ public final class LanPanel extends JPanel implements AutoCloseable {
         waitingModel.clear();
         history.clear();
         history.put("public", new StringBuilder());
-        matchId = gameP1 = gameP2 = "";
-        canvas.clear();
+        // Solo games do not depend on the session and keep running.
+        if (active == null || active.networked()) {
+            endActive();
+            gameLabel.setText("No active game");
+            helpLabel.setText(IDLE_HELP);
+        }
         chatLog.setText("");
-        gameLabel.setText("No active game");
-        helpLabel.setText("Select a participant to challenge.");
         updateTargets();
         updateEnabled();
     }
@@ -361,16 +429,94 @@ public final class LanPanel extends JPanel implements AutoCloseable {
     private void sendChallenge() {
         if (session == null) return;
         Target user = (Target) challenger.getSelectedItem();
-        if (user == null) return;
-        session.challenge(user.id(), (String) gameChoice.getSelectedItem());
+        GameDefinition game = selectedGame();
+        if (user == null || game == null) return;
+        session.challenge(user.id(), game.id());
     }
 
-    private void playMove(int position) {
-        if (session != null && !matchId.isEmpty()) session.move(matchId, position);
+    private boolean networkMatchRunning() {
+        return active != null && active.networked() && !active.finished;
     }
 
-    private void movePaddle(int direction) {
-        if (session != null && !matchId.isEmpty()) session.paddle(matchId, direction);
+    private void startSolo() {
+        GameDefinition game = selectedGame();
+        if (game == null || game.minPlayers() != 1) return;
+        if (networkMatchRunning()) {
+            error("Finish your current match first.");
+            return;
+        }
+        Active solo = new Active("solo", game, List.of(SoloGame.PLAYER_ID), SoloGame.PLAYER_ID);
+        if (!show(solo)) return;
+        try {
+            solo.solo = new SoloGame(game,
+                    state -> SwingUtilities.invokeLater(() -> { if (active == solo) applyState(solo, state); }),
+                    failure -> SwingUtilities.invokeLater(() -> {
+                        if (active == solo) {
+                            endActive();
+                            gameLabel.setText("Game error: " + failure);
+                        }
+                    }));
+            solo.solo.start();
+        } catch (RuntimeException broken) {
+            endActive();
+            error("Could not start " + game.displayName() + ": " + broken.getMessage());
+        }
+    }
+
+    /** Replaces the arena with a new match's view. Returns false when the game's view failed. */
+    private boolean show(Active next) {
+        endActive();
+        try {
+            next.view = next.game.createView(next);
+        } catch (RuntimeException broken) {
+            error("Could not open " + next.game.displayName() + ": " + broken.getMessage());
+            return false;
+        }
+        active = next;
+        arena.removeAll();
+        arena.add(next.view.component(), BorderLayout.CENTER);
+        arena.revalidate();
+        arena.repaint();
+        gameLabel.setText(next.networked()
+                ? next.game.displayName() + ": " + String.join(" vs ", next.players.stream().map(this::display).toList())
+                : next.game.displayName() + " (solo)");
+        helpLabel.setText(next.game.help());
+        tabs.setSelectedIndex(2);
+        next.view.component().requestFocusInWindow();
+        updateEnabled();
+        return true;
+    }
+
+    private void applyState(Active match, GameState state) {
+        try {
+            match.view.update(state);
+            if (state.finished()) {
+                match.finished = true;
+                match.close();
+                gameLabel.setText(resultText(match, state.winner()));
+                helpLabel.setText(match.networked()
+                        ? "Match finished. You can challenge someone again." : "Finished. Press Play solo to go again.");
+                updateEnabled();
+            } else {
+                String status = match.view.status(state);
+                helpLabel.setText(status == null || status.isBlank() ? match.game.help() : status);
+            }
+        } catch (RuntimeException broken) {
+            endActive();
+            gameLabel.setText(match.game.displayName() + " stopped: its view failed (" + broken.getMessage() + ")");
+        }
+    }
+
+    /** Stops the current match's view (and solo runner) and shows the empty arena. */
+    private void endActive() {
+        Active previous = active;
+        active = null;
+        if (previous != null) previous.close();
+        arena.removeAll();
+        arena.add(placeholder, BorderLayout.CENTER);
+        arena.revalidate();
+        arena.repaint();
+        updateEnabled();
     }
 
     /** Each session gets its own callback generation; old sessions cannot update a new one. */
@@ -440,7 +586,7 @@ public final class LanPanel extends JPanel implements AutoCloseable {
                 }
                 case "CHALLENGE_SENT" -> {
                     if (packet.has(3)) {
-                        gameLabel.setText("Challenge sent to " + display(packet.get(1)));
+                        gameLabel.setText(games.name(packet.get(2)) + " challenge sent to " + display(packet.get(1)));
                         helpLabel.setText("Waiting for the other player to accept or decline.");
                     }
                 }
@@ -452,13 +598,18 @@ public final class LanPanel extends JPanel implements AutoCloseable {
                     }
                 }
                 case "GAME_START" -> startGame(packet);
-                case "GAME_GRID" -> gridUpdate(packet);
-                case "GAME_PONG" -> pongUpdate(packet);
+                case "GAME_STATE" -> {
+                    GameState state = GamePackets.parseState(packet);
+                    Active match = active;
+                    if (state != null && match != null && match.networked() && match.matchId.equals(packet.get(0))) {
+                        applyState(match, state);
+                    }
+                }
                 case "GAME_OVER" -> {
-                    if (packet.has(2) && packet.get(0).equals(matchId)) {
+                    if (packet.has(2) && active != null && active.networked() && packet.get(0).equals(active.matchId)) {
+                        endActive();
                         gameLabel.setText(packet.get(1));
                         helpLabel.setText("The match ended. You can start a new challenge.");
-                        canvas.clear();
                     }
                 }
                 case "ERROR" -> { if (packet.has(1)) error(packet.get(0)); }
@@ -542,51 +693,30 @@ public final class LanPanel extends JPanel implements AutoCloseable {
 
     private void receiveChallenge(Packet packet) {
         if (!packet.has(3) || session == null) return;
-        String challengeId = packet.get(0), fromId = packet.get(1), type = packet.get(2);
+        String challengeId = packet.get(0), fromId = packet.get(1), type = games.name(packet.get(2));
+        String replaces = active != null && !active.networked() && !active.finished
+                ? " Your solo game will end." : "";
         int result = JOptionPane.showConfirmDialog(this,
-                display(fromId) + " challenges you to " + type + ". Accept?",
+                display(fromId) + " challenges you to " + type + ". Accept?" + replaces,
                 "IDEle Game Challenge", JOptionPane.YES_NO_OPTION, JOptionPane.QUESTION_MESSAGE);
         if (session != null) session.respond(challengeId, result == JOptionPane.YES_OPTION);
     }
 
     private void startGame(Packet packet) {
-        if (!packet.has(4) || session == null) return;
-        matchId = packet.get(0);
-        String type = packet.get(1);
-        gameP1 = packet.get(2);
-        gameP2 = packet.get(3);
-        canvas.begin(type, session.selfId(), gameP1, gameP2);
-        gameLabel.setText(type + ": " + display(gameP1) + " vs " + display(gameP2));
-        helpLabel.setText(Rules.PONG.equals(type)
-                ? "Click the arena to focus, then hold W/S or Up/Down. First to 7 wins."
-                : "Player X starts. Click an available square/column on your turn.");
-        tabs.setSelectedIndex(2);
-    }
-
-    private void gridUpdate(Packet packet) {
-        if (!packet.has(5) || !packet.get(0).equals(matchId)) return;
-        canvas.grid(packet.get(1), packet.get(2), packet.get(3), packet.get(4));
-        if ("finished".equals(packet.get(3))) {
-            gameLabel.setText(resultText(packet.get(4)));
-            helpLabel.setText("Match finished. You can challenge someone again.");
-        } else helpLabel.setText("Turn: " + display(packet.get(2)) +
-                (session != null && session.selfId().equals(packet.get(2)) ? " (you)" : ""));
-    }
-
-    private void pongUpdate(Packet packet) {
-        if (!packet.has(9) || !packet.get(0).equals(matchId)) return;
-        canvas.pong(packet.get(1), packet.get(2), packet.get(3), packet.get(4),
-                packet.get(5), packet.get(6), packet.get(7), packet.get(8));
-        if ("finished".equals(packet.get(7))) {
-            gameLabel.setText(resultText(packet.get(8)));
-            helpLabel.setText("Match finished. You can challenge someone again.");
+        if (packet.fields().size() < 3 || session == null) return;
+        GameDefinition game = games.find(packet.get(1));
+        if (game == null) {
+            error("The host started " + packet.get(1) + ", which is not installed here.");
+            return;
         }
+        List<String> players = packet.fields().subList(2, packet.fields().size());
+        show(new Active(packet.get(0), game, players, session.selfId()));
     }
 
-    private String resultText(String winner) {
-        if ("draw".equals(winner)) return "Draw game";
-        if (session != null && session.selfId().equals(winner)) return "You won!";
-        return display(winner) + " won";
+    private String resultText(Active match, String winner) {
+        if (GameState.DRAW.equals(winner)) return "Draw game";
+        if (match.self.equals(winner)) return match.networked() ? "You won!" : "Solved!";
+        return winner.isEmpty() ? "Game over" : display(winner) + " won";
     }
 
     private void updateEnabled() {
@@ -608,9 +738,11 @@ public final class LanPanel extends JPanel implements AutoCloseable {
         chatRecipient.setEnabled(connected);
         message.setEnabled(connected);
         sendButton.setEnabled(connected);
+        GameDefinition game = selectedGame();
         challenger.setEnabled(connected && challenger.getItemCount() > 0);
-        gameChoice.setEnabled(connected);
-        challengeButton.setEnabled(challenger.isEnabled());
+        gameChoice.setEnabled(gameChoice.getItemCount() > 0);
+        challengeButton.setEnabled(challenger.isEnabled() && game != null && game.maxPlayers() >= 2);
+        soloButton.setEnabled(game != null && game.minPlayers() == 1 && !networkMatchRunning());
     }
 
     private void error(String text) {
@@ -639,7 +771,14 @@ public final class LanPanel extends JPanel implements AutoCloseable {
         Session previous = session;
         session = null;
         if (previous != null) previous.close();
-        if (SwingUtilities.isEventDispatchThread()) sessionKeyField.setText("");
-        else SwingUtilities.invokeLater(() -> sessionKeyField.setText(""));
+        Active game = active;
+        if (game != null && game.solo != null) game.solo.close(); // Thread-safe; stops solo ticks at once.
+        if (SwingUtilities.isEventDispatchThread()) {
+            sessionKeyField.setText("");
+            endActive();
+        } else SwingUtilities.invokeLater(() -> {
+            sessionKeyField.setText("");
+            endActive();
+        });
     }
 }

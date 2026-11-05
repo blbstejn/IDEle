@@ -7,10 +7,8 @@ public final class Rules {
     public static final int MAX_PARTICIPANTS = 16;
     public static final int MAX_CHAT = 1200;
     // v2 intentionally refuses plaintext v1 peers; never downgrade encryption.
-    public static final String PROTOCOL = "2";
-    public static final String TIC_TAC_TOE = "Tic-Tac-Toe";
-    public static final String CONNECT_FOUR = "Connect Four";
-    public static final String PONG = "Pong";
+    // v3 replaced the per-game packets with the generic GAME_* packets in GamePackets.
+    public static final String PROTOCOL = "3";
 
     private Rules() { }
 
@@ -47,9 +45,5 @@ public final class Rules {
             throw new IllegalArgumentException("Messages must contain 1–" + MAX_CHAT + " characters");
         }
         return clean;
-    }
-
-    public static boolean supportedGame(String game) {
-        return TIC_TAC_TOE.equals(game) || CONNECT_FOUR.equals(game) || PONG.equals(game);
     }
 }

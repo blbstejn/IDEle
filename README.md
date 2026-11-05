@@ -1,95 +1,85 @@
-# IDEle v1.1.1 — encrypted LAN chat and games for JetBrains Rider
+# IDEle — LAN chat and games for JetBrains Rider
 
-**IDEle** (previously **Rider LAN**) is a Windows-first Rider tool-window plugin for collaboration on a private LAN. It provides shared chat, host-relayed direct messages, approval-controlled sessions, Tic-Tac-Toe, Connect Four and Pong. A host can configure a total room capacity of **2–16 participants, including the host**. No cloud server is required.
+**IDEle** is a Rider tool-window plugin for teams on the same private network. It provides encrypted shared chat, direct messages, host-approved sessions of 2–16 people, and a pluggable set of games: Tic-Tac-Toe, Connect Four and Pong against other participants, plus Lights Out to play solo. No cloud server is needed.
 
-> **Preview and security warning.** The distributable included with this project is an **unsigned, offline-built preview**, not a Rider-SDK-verified production release. The v1.1 transport uses Java's standard X25519, HMAC-SHA256 and AES-256-GCM primitives, but the *protocol combining them is custom and has not been independently security-audited*. Do **not** use it yet for company secrets, credentials, legally sensitive communications or untrusted/public networks. For production chat, independently review the cryptography and validate the plugin with real Rider builds.
+> **Security note.** The transport uses Java's standard X25519, HMAC-SHA256 and AES-256-GCM primitives, but the protocol combining them is custom and has not been independently audited. Don't use IDEle for secrets, credentials or sensitive communications, or on untrusted or public networks.
 
-## Reliability and security review in v1.1.1
+## Install
 
-- Replaced synchronous client socket writes with a **bounded asynchronous queue**. Sending chat, game commands and closing a connection no longer waits for a stalled remote TCP receiver on Rider's Swing UI thread. An outbound overflow disconnects the affected client rather than freezing Rider.
-- **Leave / project disposal now cancels in-progress connections** by closing the pending socket, including while the peer never finishes the authentication handshake.
-- The session-key input is **cleared when a session ends or a join is cancelled**. Clipboard copies are not automatically erased.
-- Usernames reject Unicode formatting controls, line separators and unpaired surrogates, and the chat log escapes embedded controls/newlines to prevent messages visually impersonating system notices.
-- The offline ZIP build now deletes any existing destination archive first; removed classes can no longer survive in-place `zip` updates. Source and tests compile with `-Xlint:all -Werror`.
-- Added regression checks for slow/non-reading hosts, mid-handshake cancellation, key cleanup and log spoofing. **94 local assertions pass**.
-- **No encrypted protocol change:** v1.1.1 still uses protocol 2. Existing v1.1.0 clients and v1.1.1 clients share the same wire protocol, though upgrading all clients is strongly recommended.
+1. Build `IDEle-1.2.0.zip` (see [Building](#building)) or download it from the GitHub releases.
+2. In Rider: **Settings → Plugins → ⚙ → Install Plugin from Disk**, choose the ZIP (don't extract it), and restart if asked.
+3. Open the **IDEle** tool window from the right-hand stripe or **View → Tool Windows**.
 
-## Features introduced in v1.1.0
-
-- Renamed the visible plugin, tool window and ZIP to **IDEle**. The plugin ID remains `dev.riderlan`, so Rider can treat it as an upgrade; Java package names are kept stable for compatibility.
-- Configurable session cap of **2–16**, including the host. Expanded roster protocol framing to carry all 16 names.
-- **Authenticated encryption in transit for every network application packet**, including shared/direct chat, usernames, join approvals, participant rosters and games.
-- A fresh 256-bit session key is generated for each hosted session; the host shares it **out of band** with invited members. The key is required before the host even sees a join request, and **the host must also approve** the participant.
-- Connection uses an ephemeral X25519 exchange authenticated with the shared key, directional AES-256-GCM encryption with per-frame counters and message integrity protection. Plaintext v1.0.x clients cannot connect or force a downgrade.
-- Joining now accepts a **host IPv4 address or working DNS hostname**. A DNS name makes an IP easier to remember; **DNS does not hide any IP address**. No DNS server was added.
-- Pending approvals expire on the host scheduler without using socket timeouts mid-frame; approved clients can remain idle.
-
-## Install / upgrade
-
-1. Use the **`IDEle-1.1.1.zip`** file without extracting it. All participants must use IDEle v1.1.x (encrypted protocol 2); using v1.1.1 on all machines is recommended.
-2. Rider: **Settings → Plugins → gear icon → Install Plugin from Disk**. Restart if requested.
-3. Open the **IDEle** tool window from the right tool-window stripe or **View → Tool Windows**.
-4. The internal plugin ID is still `dev.riderlan`, matching the earlier Rider LAN preview. If Rider refuses to upgrade from v1.0.1, disable/uninstall that preview, restart Rider, then install v1.1.1. Do not install both versions simultaneously.
-
-**Version incompatibility:** IDEle v1.1.x uses encrypted protocol `2` and **cannot join RiderLAN v1.0.0/v1.0.1 sessions**. Everyone must use v1.1.x or later with a compatible protocol.
+Everyone in a session needs IDEle 1.2.x (protocol 3). Earlier versions can't join 1.2 sessions.
 
 ## Hosting and joining
 
-**Host:** Choose a username, TCP port (default **43137**) and **Max participants** (default 16). Select **Host Session**. IDEle creates a **new random session key** and displays it in a masked field. Use **Copy session key** to share that key privately with invited participants. Share the host's local IPv4 address (shown in the Session tab) or a DNS hostname that resolves to it. Approve or reject each incoming request; the host is counted toward the limit. Pending requests expire after roughly two minutes.
+**Host:** enter a username, TCP port (default **43137**) and maximum participants (2–16, including you), then press **Host Session**. IDEle generates a random session key. Use **Copy session key** to share it privately with the people you invite, together with your LAN IP (shown in the Session tab) or a hostname that resolves to it. Approve or reject each join request. Pending requests expire after about two minutes.
 
-**Joiner:** Enter a unique username, host **IP/DNS name**, matching port, and the host's **43-character session key**. Select **Join Session** and wait for approval. Joining with a wrong key is rejected *before* the approval dialog. The key is held in memory, not written to disk by IDEle, and its input field is cleared when the session is left or closed. Previously copied clipboard entries may remain elsewhere.
+**Join:** enter a unique username, the host's IP or hostname, the port and the 43-character session key, then press **Join Session** and wait for approval. A wrong key is rejected before the host sees a request. The key is kept in memory only and is cleared from the field when you leave.
 
-**Firewall:** Keep the host reachable only through an appropriately restricted Windows **Private** firewall rule on your trusted LAN. Do not port-forward TCP 43137 to the public internet. Messages and games remain in memory; closing the host disconnects everyone. Client writes are buffered in a bounded queue, and a slow/non-reading host causes the client to disconnect rather than block the UI. No message history is persisted or restored.
+**Firewall:** allow the port only through a Windows **Private** network firewall rule, and never forward it to the internet. Nothing is stored on disk; closing the host session disconnects everyone.
 
 ## Chat and games
 
-- **Chat:** Select **Everyone** for shared chat or another participant for direct chat. IDEle encrypts each client's connection with the host, but the **host decrypts and relays direct messages**. These are **not end-to-end encrypted between the two users**, nor are they anonymous from the host.
-- **Tic-Tac-Toe / Connect Four:** Select an opponent, send a challenge, wait for acceptance and take turns. Rules and game state are authoritative on the host.
-- **Pong:** Click the arena to focus, hold **W/S** or **Up/Down** to move, and play to seven points. The host runs a 25 Hz simulation. A slow/non-reading client is disconnected rather than blocking everyone else's connection.
+- **Chat:** choose **Everyone** for shared chat or a participant for a direct message. Direct messages are relayed and readable by the host; they are not end-to-end encrypted.
+- **Head-to-head games:** in the **Games** tab, pick a game and an opponent and press **Challenge**. The host runs the rules for every match, and each player sees the shared state. You can only challenge someone who has the same game installed.
+- **Solo games:** pick a game marked *solo* and press **Play solo**. Solo games run locally and work without a session.
+- **Pong:** click the arena, then hold **W/S** or **↑/↓**. First to seven wins.
 
-## Security boundaries and DNS clarification
+## Adding or changing a game
 
-- The encryption protects traffic **in transit between each client and the host** from passive interception and rejects modified ciphertext. Only invited people with the randomly generated shared session key can authenticate to the service; the host must approve them separately.
-- **The shared key is a group credential**, not an individual user's identity. Anyone with it can attempt to impersonate a member or a host. There is no key revocation, membership-specific certificate, verified user identity, 2FA, E2EE or persistent trust store. If a key is leaked, **end the session and create a new one**.
-- **No verified IP hiding.** Every client connects to an IP after resolving the supplied hostname; the host and underlying network infrastructure can observe connection IPs. Changing a hostname or operating a DNS server does not conceal IP addresses. IP hiding requires a separate relay/VPN architecture, which this LAN-only plugin does not implement.
-- The code uses standard JDK crypto primitives but a newly written application handshake and transport, not TLS 1.3 or a vetted Noise implementation. Tests are **not a substitute for independent security review**. Do not rely on IDEle for sensitive workplace communications until it has undergone that review.
-- Clipboard copying may expose the session key to Windows clipboard history/sync; share keys through an appropriate trusted channel and clear clipboard history when necessary.
+Each game is a self-contained module in its own package under `src/main/java/dev/riderlan/games/`, built on the small API in `dev.riderlan.game`. You can develop a new game, or rework an existing one, on its own branch without touching the session, chat or UI code. See **[docs/games.md](docs/games.md)** for the step-by-step guide.
 
-## Source and build
+## Project layout
 
-`src/main/java/dev/riderlan/core` contains the network/protocol/game engine, including `SecureTransport`. `src/main/java/dev/riderlan/ui` implements the native Swing tool window. `src/main/resources/META-INF/plugin.xml` identifies the plugin and makes it Rider-specific. The **package name** and **plugin ID** are intentionally unchanged from Rider LAN to allow upgrades.
+| Path | Contents |
+| --- | --- |
+| `src/main/java/dev/riderlan/core` | Sessions, encrypted transport, packet codec, generic match runner |
+| `src/main/java/dev/riderlan/game` | Game module API: `GameDefinition`, `GameLogic`, `GameView`, `GameState`, `GameRegistry` |
+| `src/main/java/dev/riderlan/games/*` | One package per game |
+| `src/main/java/dev/riderlan/ui` | The Swing tool window |
+| `src/main/resources/META-INF` | `plugin.xml` and the game registration file |
+| `src/test/java` | Protocol, session, UI and game tests (no external test libraries) |
+| `offline-stubs` | Compile-time IntelliJ signatures for the offline build; never packaged |
 
-### Official Gradle build (recommended for distribution)
+The plugin ID (`dev.riderlan`) and Java package names are kept from the plugin's earlier name, Rider LAN, so existing installations upgrade in place.
 
-Requires an installed **JDK 21+**, **Gradle 9+**, and network access to JetBrains/Gradle dependencies. The project is configured to compile against the **Rider 2024.2 SDK**, targeting Java 21 bytecode, and requests plugin verification against Rider 2024.2, 2025.3 and 2026.2.2:
+## Building
+
+**Gradle** (JDK 21+, Gradle 9+, network access to JetBrains repositories) compiles against the Rider 2024.2 SDK and runs the plugin verifier:
 
 ```powershell
 gradle integrationTest buildPlugin verifyPlugin
 ```
 
-For a genuine release, use the **Gradle-built ZIP** in `build/distributions/` after passing verification and installation tests. The project does not bundle a Gradle Wrapper; install Gradle separately if needed.
+The plugin ZIP is written to `build/distributions/`.
 
-### Offline preview build (cannot confirm Rider API compatibility)
-
-With **JDK 21** installed (needs `java`, `javac`, `jar`):
+**Offline** (JDK 21 with `java`, `javac` and `jar`) compiles against the stubs in `offline-stubs/`, runs all tests and writes `IDEle-1.2.0.zip` to the project root:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\build-offline.ps1
 ```
 
-On Linux/macOS with JDK 21 and `zip`: `sh tools/build-offline.sh`.
+On Linux or macOS: `sh tools/build-offline.sh` (also needs `zip`).
 
-The scripts compile the tiny JetBrains IDE integration layer against **compile-time signatures in `offline-stubs/`**, *never package the stubs*, run localhost tests and create `IDEle-1.1.1.zip`. The Linux script was executed in this environment; the Windows PowerShell script was reviewed but not run.
+The plugin supports Rider 2024.2 (build 242) and later.
 
-**Rider 2026.2.2 / RD-262.10315.191** is the intended main target. Minimum declared build remains `242` (2024.2), with no upper bound. **The actual IDE compatibility claim remains unverified** until an SDK-backed compilation, Plugin Verifier and real Rider installation succeed.
+## Security details
 
-See [docs/verification.md](docs/verification.md) for tests, remaining risks and acceptance checklist, and [docs/review-1.1.1.md](docs/review-1.1.1.md) for the code-review findings.
+- Each client's connection to the host is encrypted and integrity-protected. Only people with the session key can connect, and the host must still approve each of them.
+- The session key is a shared group secret, not a personal identity. Anyone who has it can try to join or impersonate a member. If it leaks, end the session and host a new one.
+- IP addresses are not hidden: the host and the network can see who connects, whether you use an IP address or a hostname.
+- Copying the key may store it in Windows clipboard history. Share it over a trusted channel.
+- A slow or unresponsive participant is disconnected instead of freezing Rider or the other players.
 
 ## Troubleshooting
 
-- **Incorrect key / cannot authenticate:** Ensure everyone uses the **IDEle v1.1.x with matching encrypted protocol**, host IP/hostname, port and 43-character key. Host approval is separate from key authentication.
-- **Cannot connect:** Confirm LAN routing, hostname resolution (if using a name), private Windows firewall settings, and the host's listening port.
-- **Approval missing:** The host sees join requests only **after** key authentication; bad keys will not create requests.
-- **Room full:** Capacity is set by the host from 2 to 16, including themselves.
-- **Rider reports incompatibility / tool window missing:** Rebuild with the official Rider SDK and check [verification notes](docs/verification.md).
-- **Pong controls:** Click the arena or press its Focus button before using W/S or arrow keys.
+- **Can't authenticate:** check that everyone uses IDEle 1.2.x and the same host, port and key.
+- **Can't connect:** check LAN routing, hostname resolution, the Windows firewall rule and that the host is listening on the port.
+- **No join request appears:** the host only sees requests after the key check succeeds, so a wrong key never shows up.
+- **"… does not have … installed":** the other player's IDEle build doesn't include that game. Both players need it.
+- **Room full:** the host sets the limit (2–16, including the host).
+- **Pong doesn't respond to keys:** click the arena first so it has keyboard focus.
+
+More test and review notes are in [docs/verification.md](docs/verification.md) and [docs/review-1.1.1.md](docs/review-1.1.1.md).
